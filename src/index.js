@@ -13,17 +13,19 @@ const app = new Hono()
  * @param {import('hono').Next} next
  */
 const authMiddleware = async (c, next) => {
-  /** @type {Env} */
-  const env = c.env
-  const apiKeyBody = await c.req.json().catch(() => ({}))
+  const env = c.env;
   
-  if (!apiKeyBody.apiKey || apiKeyBody.apiKey !== env.WEBAPP_APIKEY) {
-    return c.json({ success: false, message: 'Unauthorized: Invalid or missing API Key' }, 401)
+  const apiKeyHeader = c.req.header('X-API-Key');
+  
+  if (!apiKeyHeader || apiKeyHeader !== env.WEBAPP_APIKEY) {
+    return c.json({ 
+      success: false, 
+      message: 'Unauthorized: Invalid or missing API Key' 
+    }, 401);
   }
   
-  // Lanjut ke handler
-  await next()
-}
+  await next();
+};
 
 
 // ===================================
@@ -139,7 +141,7 @@ adminArticles.post('/add', async (c) => {
   /** @type {Env} */
   const env = c.env
   const body = await c.req.json()
-  const { slug, title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body
+  const { slug, title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body.data
   
   if (!slug || !title || !content) {
     return c.json({ success: false, message: 'Missing required fields: slug, title, content' }, 400)
@@ -180,7 +182,7 @@ adminArticles.put('/put/:slug', async (c) => {
   const body = await c.req.json()
   
   // Ambil hanya kolom yang relevan untuk update
-  const { title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body
+  const { title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body.data
 
   if (!title && !content) {
     return c.json({ success: false, message: 'No fields to update provided' }, 400)
