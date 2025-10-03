@@ -8,7 +8,7 @@ const app = new Hono()
 // ===================================
 /**
  * Middleware untuk memverifikasi API Key.
- * API Key diharapkan ada di body request sebagai { apiKey: '...' }
+ * API Key diharapkan ada di Header: X-API-Key.
  * @param {import('hono').Context} c
  * @param {import('hono').Next} next
  */
@@ -20,11 +20,24 @@ const authMiddleware = async (c, next) => {
   if (!apiKeyHeader || apiKeyHeader !== env.WEBAPP_APIKEY) {
     return c.json({ 
       success: false, 
-      message: 'Unauthorized: Invalid or missing API Key' 
+      message: 'Unauthorized: Invalid or missing X-API-Key in header' 
     }, 401);
   }
   
   await next();
+};
+
+/**
+ * Utility: Membuat excerpt dari konten markdown.
+ * @param {string} content - Konten artikel (Markdown).
+ * @returns {string} Potongan 150 karakter pertama.
+ */
+const createExcerpt = (content) => {
+    if (!content) return null;
+    // Hapus karakter markdown dasar seperti #, *, -, >, [, ]
+    const cleanText = content.replace(/[\#\*\-\>\[\]\n]/g, '').trim();
+    // Ambil 150 karakter pertama
+    return cleanText.substring(0, 150) + (cleanText.length > 150 ? '...' : '');
 };
 
 
@@ -49,7 +62,8 @@ app.get('/api/articles', async (c) => {
   const offset = (page - 1) * size
   
   let query = `
-    SELECT * FROM articles 
+    SELECT id, slug, title, excerpt, featured_image, category, author, published_at, created_at, updated_at 
+    FROM articles 
     WHERE status = 'published'
   `
   const params = []
@@ -99,8 +113,9 @@ app.get('/api/articles', async (c) => {
 })
 
 /**
- * Endpoint: GET /api/articles/:slug-post
+ * Endpoint: GET /api/articles/:slug
  * Detail artikel berdasarkan slug
+ * Note: Mengembalikan FULL content
  */
 app.get('/api/articles/:slug', async (c) => {
   /** @type {Env} */
@@ -127,72 +142,92 @@ app.get('/api/articles/:slug', async (c) => {
 })
 
 // ===================================
-// Endpoint Admin: Articles (dilindungi API Key)
+// Endpoint Admin Group (CRUD)
+// Path: /api/admin/articles
 // ===================================
 const adminArticles = new Hono()
 adminArticles.use(authMiddleware) // Terapkan API Key Middleware untuk semua endpoint di group ini
 
 /**
- * Endpoint: POST /api/admin/articles/add
- * Menambah artikel baru.
- * Body: { apiKey: '...', slug, title, content, ... }
+ * Endpoint: POST /api/admin/articles
+ * Menambah artikel baru (ADD).
+ * Body: { slug, title, content, ... }
  */
-adminArticles.post('/add', async (c) => {
+adminArticles.post('/articles', async (c) => {
   /** @type {Env} */
   const env = c.env
-  const body = await c.req.json()
-  const { slug, title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body.data
-  
-  if (!slug || !title || !content) {
-    return c.json({ success: false, message: 'Missing required fields: slug, title, content' }, 400)
+  let body;
+  try {
+    // Payload dari Apps Script sudah disederhanakan
+    body = await c.req.json();
+  } catch (e) {
+    return c.json({ success: false, message: 'Invalid JSON payload received.' }, 400);
   }
   
-  const published_at = (status === 'published' && !body.published_at) ? new Date().toISOString() : (body.published_at || null)
+  const { slug, title, content, featured_image, category, author, status, meta_title, meta_description } = body
+  
+  // 1. Validasi
+  if (!slug || !title || !content) {
+    return c.json({ success: false, message: 'Validation failed: slug, title, and content are required.' }, 400)
+  }
+  
+  // 2. Data Otomatis & Derived
+  const published_at = (status && status.toLowerCase() === 'published') ? new Date().toISOString() : null
+  const excerpt = createExcerpt(content) // EXCERPT diambil dari content
+  const currentTimestamp = new Date().toISOString()
 
   try {
     const query = `
-      INSERT INTO articles (slug, title, excerpt, content, featured_image, category, author, status, published_at, meta_title, meta_description)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO articles (slug, title, excerpt, content, featured_image, category, author, status, published_at, meta_title, meta_description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
     await env.DB.prepare(query).bind(
-      slug, title, excerpt, content, featured_image, 
-      category, author || 'Admin', status || 'draft', published_at, 
-      meta_title, meta_description
+      slug, 
+      title, 
+      excerpt, // Nilai EXCERPT
+      content, 
+      featured_image || null, 
+      category || null, 
+      author || 'Admin', 
+      status || 'draft', 
+      published_at, 
+      meta_title || null, 
+      meta_description || null,
+      currentTimestamp,
+      currentTimestamp
     ).run()
     
     return c.json({ success: true, message: 'Article added successfully', slug })
   } catch (error) {
-    if (error.message && error.message.includes('UNIQUE constraint failed: articles.slug')) {
-       return c.json({ success: false, message: 'Slug already exists' }, 409)
-    }
     console.error('Error adding article:', error)
-    return c.json({ success: false, message: 'Failed to add article' }, 500)
+    if (error.message && error.message.includes('UNIQUE constraint failed: articles.slug')) {
+       return c.json({ success: false, message: `Failed to add article: SLUG '${slug}' already exists.` }, 409)
+    }
+    return c.json({ success: false, message: `Error adding article: ${error.message}` }, 500)
   }
 })
 
 /**
- * Endpoint: PUT /api/admin/articles/put/:slug
- * Mengubah artikel berdasarkan slug.
- * Body: { apiKey: '...', title, content, ... }
+ * Endpoint: PUT /api/admin/articles
+ * Mengubah artikel (UPDATE). Slug diambil dari Body.
+ * Body: { slug, title, content, ... }
  */
-adminArticles.put('/put/:slug', async (c) => {
+adminArticles.put('/articles', async (c) => {
   /** @type {Env} */
   const env = c.env
-  const targetSlug = c.req.param('slug')
-  const body = await c.req.json()
-  
-  // Ambil hanya kolom yang relevan untuk update
-  const { title, excerpt, content, featured_image, category, author, status, meta_title, meta_description } = body.data
-
-  if (!title && !content) {
-    return c.json({ success: false, message: 'No fields to update provided' }, 400)
+  let body;
+  try {
+    body = await c.req.json();
+  } catch (e) {
+    return c.json({ success: false, message: 'Invalid JSON payload received.' }, 400);
   }
 
-  // Tentukan published_at. Jika status diubah jadi 'published' dan belum ada tanggal publish, set sekarang.
-  let published_at_clause = ''
-  let published_at_value = null
-  let updateParams = []
-  let setClauses = []
+  const { slug, title, content, featured_image, category, author, status, meta_title, meta_description } = body
+  const targetSlug = slug // Ambil slug dari body untuk UPDATE
+
+  if (!targetSlug) {
+    return c.json({ success: false, message: 'Missing required field: slug in body for update' }, 400)
+  }
 
   // Ambil data artikel yang sudah ada untuk cek `published_at`
   const existingArticle = await env.DB.prepare('SELECT status, published_at FROM articles WHERE slug = ?').bind(targetSlug).first()
@@ -200,29 +235,53 @@ adminArticles.put('/put/:slug', async (c) => {
     return c.json({ success: false, message: 'Article not found' }, 404)
   }
 
-  const newStatus = status || existingArticle.status;
+  let updateParams = []
+  let setClauses = []
+
+  // Tentukan status baru (jika ada di body)
+  const newStatus = (status && status.toLowerCase()) || existingArticle.status;
+  
+  // === LOGIKA PUBLISHED_AT ===
+  let publishedAtValue = existingArticle.published_at;
   
   if (newStatus === 'published' && !existingArticle.published_at) {
-    published_at_value = new Date().toISOString()
-    setClauses.push('published_at = ?')
-    updateParams.push(published_at_value)
+    // Jika status diubah ke 'published' DAN belum pernah dipublikasikan, set tanggal sekarang
+    publishedAtValue = new Date().toISOString()
   } else if (newStatus !== 'published' && existingArticle.published_at) {
-    // Jika status diubah dari published ke draft/lainnya, reset published_at
-    setClauses.push('published_at = ?')
-    updateParams.push(null) 
+    // Jika status diubah dari published ke draft/lainnya, reset tanggal
+    publishedAtValue = null
   }
-
+  
+  setClauses.push('published_at = ?')
+  updateParams.push(publishedAtValue)
+  
+  // === LOGIKA EXCERPT (Di-derive dari CONTENT jika CONTENT berubah) ===
+  let excerptValue = existingArticle.excerpt;
+  if (content !== undefined) {
+      excerptValue = createExcerpt(content);
+      setClauses.push('excerpt = ?')
+      updateParams.push(excerptValue)
+  }
+  
   // Siapkan kolom dan parameter untuk update
-  const fields = { title, excerpt, content, featured_image, category, author, status, meta_title, meta_description }
+  const fields = { title, content, featured_image, category, author, status: newStatus, meta_title, meta_description }
   
   for (const [key, value] of Object.entries(fields)) {
-    if (value !== undefined) {
+    // Kita skip slug karena digunakan di WHERE clause, dan kita skip content/excerpt/published_at karena sudah di-handle di atas
+    if (value !== undefined && key !== 'content') {
       setClauses.push(`${key} = ?`)
       updateParams.push(value)
     }
   }
+  
+  // Tambahkan CONTENT jika ada perubahan
+  if (content !== undefined) {
+      setClauses.push('content = ?')
+      updateParams.push(content)
+  }
 
-  if (setClauses.length === 0) {
+
+  if (setClauses.length <= 1) { // 1 karena published_at selalu masuk
     return c.json({ success: false, message: 'No valid fields provided for update' }, 400)
   }
   
@@ -245,19 +304,30 @@ adminArticles.put('/put/:slug', async (c) => {
     return c.json({ success: true, message: 'Article updated successfully', slug: targetSlug })
   } catch (error) {
     console.error('Error updating article:', error)
-    return c.json({ success: false, message: 'Failed to update article' }, 500)
+    return c.json({ success: false, message: `Failed to update article: ${error.message}` }, 500)
   }
 })
 
 /**
- * Endpoint: DELETE /api/admin/articles/delete/:slug
- * Menghapus artikel berdasarkan slug
- * Body: { apiKey: '...' }
+ * Endpoint: DELETE /api/admin/articles
+ * Menghapus artikel (DELETE). Slug diambil dari Body.
+ * Body: { slug, ... }
  */
-adminArticles.delete('/delete/:slug', async (c) => {
+adminArticles.delete('/articles', async (c) => {
   /** @type {Env} */
   const env = c.env
-  const slug = c.req.param('slug')
+  let body;
+  try {
+    body = await c.req.json();
+  } catch (e) {
+    return c.json({ success: false, message: 'Invalid JSON payload received.' }, 400);
+  }
+  
+  const { slug } = body // Ambil slug dari body
+  
+  if (!slug) {
+      return c.json({ success: false, message: 'Missing required field: slug in body for delete' }, 400)
+  }
   
   try {
     const query = `DELETE FROM articles WHERE slug = ?`
@@ -279,7 +349,8 @@ adminArticles.delete('/delete/:slug', async (c) => {
 // Grouping Routes dan Export
 // ===================================
 
-app.route('/api/admin/articles', adminArticles)
+// Rute ADMIN sekarang menuju /api/admin/articles/{POST/PUT/DELETE}
+app.route('/api/admin', adminArticles) // Di sini route di-group
 
 app.get('/api/settings', async (c) => {
   /** @type {Env} */
