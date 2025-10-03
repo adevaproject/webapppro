@@ -1,0 +1,16 @@
+{
+  "compatibility_date": "2025-04-01",
+  "main": "src/index.js",
+  "name": "webapppro",
+  "upload_source_maps": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "b53cece6-7ddb-4361-bed3-566f7f52e05a",
+      "database_name": "web-app-pro-db"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
